@@ -7,6 +7,8 @@ import {
   addProjectConfiguration,
   readWorkspaceConfiguration,
   updateJson,
+  logger,
+  updateProjectConfiguration,
 } from '@nrwl/devkit';
 import { serializeJson, stringUtils } from '@nrwl/workspace';
 
@@ -15,11 +17,24 @@ import { PackageJson, TsConfig } from '../../types';
 import generator from './index';
 import { MigrateConvergedPkgGeneratorSchema } from './schema';
 
+interface AssertedSchema extends MigrateConvergedPkgGeneratorSchema {
+  name: string;
+}
+
 describe('migrate-converged-pkg generator', () => {
+  // eslint-disable-next-line @typescript-eslint/no-empty-function
+  const noop = () => {};
+
   let tree: Tree;
-  const options: MigrateConvergedPkgGeneratorSchema = { name: '@proj/react-dummy' };
+  const options = { name: '@proj/react-dummy' };
 
   beforeEach(() => {
+    jest.restoreAllMocks();
+
+    jest.spyOn(console, 'log').mockImplementation(noop);
+    jest.spyOn(console, 'info').mockImplementation(noop);
+    jest.spyOn(console, 'warn').mockImplementation(noop);
+
     tree = createTreeWithEmptyWorkspace();
     tree.write(
       'jest.config.js',
@@ -41,29 +56,44 @@ describe('migrate-converged-pkg generator', () => {
   });
 
   describe('general', () => {
-    it.skip(`should throw error if provided name doesn't match existing package`, async () => {
-      expect(readProjectConfiguration(tree, '@proj/non-existent-lib')).toThrowErrorMatchingInlineSnapshot();
+    it(`should throw error if name is empty`, async () => {
+      await expect(generator(tree, { name: '' })).rejects.toMatchInlineSnapshot(
+        `[Error: --name cannot be empty. Please provide name of the package.]`,
+      );
     });
 
-    it.skip(`should throw error if user wants migrate non converged package`, async () => {
+    it(`should throw error if provided name doesn't match existing package`, async () => {
+      await expect(generator(tree, { name: '@proj/non-existent-lib' })).rejects.toMatchInlineSnapshot(
+        `[Error: Cannot find configuration for '@proj/non-existent-lib' in /workspace.json.]`,
+      );
+    });
+
+    it(`should throw error if user wants migrate non converged package`, async () => {
       const projectConfig = readProjectConfiguration(tree, options.name);
-      updateJson(tree, `${projectConfig.root}/tsconfig.json`, json => {
+      updateJson(tree, `${projectConfig.root}/package.json`, json => {
         json.version = '8.0.0';
         return json;
       });
 
-      expect(await generator(tree, options)).rejects.toMatchInlineSnapshot();
+      await expect(generator(tree, options)).rejects.toMatchInlineSnapshot(
+        // eslint-disable-next-line @fluentui/max-len
+        `[Error: @proj/react-dummy is not converged package. Make sure to run the migration on packages with version 9.x.x]`,
+      );
     });
   });
 
   describe(`tsconfig updates`, () => {
+    function getTsConfig(project: ReturnType<typeof readProjectConfiguration>) {
+      return readJson(tree, `${project.root}/tsconfig.json`);
+    }
+    function getBaseTsConfig() {
+      return readJson<TsConfig>(tree, `/tsconfig.base.json`);
+    }
+
     it('should update package local tsconfig.json', async () => {
       const projectConfig = readProjectConfiguration(tree, options.name);
-      function getTsConfig() {
-        return readJson(tree, `${projectConfig.root}/tsconfig.json`);
-      }
 
-      let tsConfig = getTsConfig();
+      let tsConfig = getTsConfig(projectConfig);
 
       expect(tsConfig).toEqual({
         compilerOptions: {
@@ -74,7 +104,7 @@ describe('migrate-converged-pkg generator', () => {
 
       await generator(tree, options);
 
-      tsConfig = getTsConfig();
+      tsConfig = getTsConfig(projectConfig);
 
       expect(tsConfig).toEqual({
         compilerOptions: {
@@ -83,11 +113,11 @@ describe('migrate-converged-pkg generator', () => {
           importHelpers: true,
           jsx: 'react',
           lib: ['es5', 'dom'],
-          module: 'commonjs',
+          module: 'CommonJS',
           noUnusedLocals: true,
           outDir: 'dist',
           preserveConstEnums: true,
-          target: 'es5',
+          target: 'ES5',
           types: ['jest', 'custom-global', 'inline-style-expand-shorthand'],
         },
         extends: '../../tsconfig.base.json',
@@ -95,12 +125,29 @@ describe('migrate-converged-pkg generator', () => {
       });
     });
 
+    it('should update compilerOptions.types definition for local tsconfig.json', async () => {
+      const projectConfig = readProjectConfiguration(tree, options.name);
+
+      updateJson(tree, `${projectConfig.root}/tsconfig.json`, (json: TsConfig) => {
+        json.compilerOptions.types = ['jest', '@testing-library/jest-dom', 'foo-bar'];
+        return json;
+      });
+
+      await generator(tree, options);
+
+      const tsConfig = getTsConfig(projectConfig);
+
+      expect(tsConfig.compilerOptions.types).toEqual([
+        'jest',
+        'custom-global',
+        'inline-style-expand-shorthand',
+        '@testing-library/jest-dom',
+        'foo-bar',
+      ]);
+    });
+
     // eslint-disable-next-line @fluentui/max-len
     it('should update root tsconfig.base.json with migrated package alias including all missing aliases based on packages dependencies list', async () => {
-      function getBaseTsConfig() {
-        return readJson<TsConfig>(tree, `/tsconfig.base.json`);
-      }
-
       setupDummyPackage(tree, { name: '@proj/react-make-styles', dependencies: {} });
       setupDummyPackage(tree, { name: '@proj/react-theme', dependencies: {} });
       setupDummyPackage(tree, { name: '@proj/react-utilities', dependencies: {} });
@@ -331,17 +378,51 @@ describe('migrate-converged-pkg generator', () => {
       };
     }
 
+    it(`should work if there are no package stories in react-examples`, async () => {
+      const reactExamplesConfig = readProjectConfiguration(tree, '@proj/react-examples');
+      const workspaceConfig = readWorkspaceConfiguration(tree);
+
+      expect(
+        tree.exists(`${reactExamplesConfig.root}/src/${options.name.replace(`@${workspaceConfig.npmScope}/`, '')}`),
+      ).toBe(false);
+
+      const loggerWarnSpy = jest.spyOn(logger, 'warn');
+      let sideEffectsCallback: () => void;
+
+      try {
+        sideEffectsCallback = await generator(tree, options);
+        sideEffectsCallback();
+      } catch (err) {
+        expect(err).toEqual(undefined);
+      }
+
+      expect(loggerWarnSpy).toHaveBeenCalledTimes(1);
+      expect(loggerWarnSpy).toHaveBeenCalledWith(
+        'No package stories found within react-examples. Skipping storybook stories migration...',
+      );
+    });
+
     it(`should move stories from react-examples package to local package within sourceRoot`, async () => {
       const { pathToStoriesWithinReactExamples, getMovedStoriesData } = setup();
 
+      const loggerWarnSpy = jest.spyOn(logger, 'warn');
+
       expect(tree.exists(pathToStoriesWithinReactExamples)).toBeTruthy();
 
-      await generator(tree, options);
+      const sideEffectsCallback = await generator(tree, options);
 
       const { movedStoriesPaths } = getMovedStoriesData();
 
       expect(tree.exists(movedStoriesPaths.storyOne)).toBe(true);
       expect(tree.exists(movedStoriesPaths.storyTwo)).toBe(true);
+
+      sideEffectsCallback();
+
+      expect(loggerWarnSpy).toHaveBeenCalledTimes(2);
+      expect(loggerWarnSpy.mock.calls[0][0]).toEqual('NOTE: Deleting packages/react-examples/src/react-dummy');
+      expect(loggerWarnSpy.mock.calls[1][0]).toEqual(
+        expect.stringContaining('- Please update your moved stories to follow standard storybook format'),
+      );
     });
 
     it(`should delete migrated package folder in react-examples`, async () => {
@@ -435,6 +516,7 @@ describe('migrate-converged-pkg generator', () => {
           "start": "just-scripts dev:storybook",
           "start-test": "just-scripts jest-watch",
           "test": "just-scripts test",
+          "test:watch": "just-scripts jest-watch",
           "update-snapshots": "just-scripts jest -u",
         }
       `);
@@ -446,16 +528,26 @@ describe('migrate-converged-pkg generator', () => {
       expect(pkgJson.scripts).toEqual({
         docs: 'api-extractor run --config=config/api-extractor.local.json --local',
         // eslint-disable-next-line @fluentui/max-len
-        'build:local': `tsc -p . --module esnext --emitDeclarationOnly && node ../../scripts/typescript/normalize-import --output dist/${projectConfig.root}/src && yarn docs`,
+        'build:local': `tsc -p . --module esnext --emitDeclarationOnly && node ../../scripts/typescript/normalize-import --output dist/react-dummy/src && yarn docs`,
         build: 'just-scripts build',
         clean: 'just-scripts clean',
         'code-style': 'just-scripts code-style',
         just: 'just-scripts',
         lint: 'just-scripts lint',
-        start: 'storybook',
+        start: 'yarn storybook',
         storybook: 'start-storybook',
         test: 'jest',
       });
+    });
+
+    it(`should create api-extractor.json`, async () => {
+      const projectConfig = readProjectConfiguration(tree, options.name);
+
+      expect(tree.exists(`${projectConfig.root}/config/api-extractor.json`)).toBeFalsy();
+
+      await generator(tree, options);
+
+      expect(tree.exists(`${projectConfig.root}/config/api-extractor.json`)).toBeTruthy();
     });
 
     it(`should create api-extractor.local.json for scripts:docs task consumption`, async () => {
@@ -468,13 +560,88 @@ describe('migrate-converged-pkg generator', () => {
       expect(tree.exists(`${projectConfig.root}/config/api-extractor.local.json`)).toBeTruthy();
     });
   });
+
+  describe(`nx workspace updates`, () => {
+    it(`should set project 'sourceRoot' in workspace.json`, async () => {
+      let projectConfig = readProjectConfiguration(tree, options.name);
+
+      expect(projectConfig.sourceRoot).toBe(undefined);
+
+      await generator(tree, options);
+
+      projectConfig = readProjectConfiguration(tree, options.name);
+
+      expect(projectConfig.sourceRoot).toBe(`${projectConfig.root}/src`);
+    });
+
+    it(`should set project 'vNext' and 'platform:web' tag in nx.json`, async () => {
+      let projectConfig = readProjectConfiguration(tree, options.name);
+      expect(projectConfig.tags).toBe(undefined);
+
+      await generator(tree, options);
+
+      projectConfig = readProjectConfiguration(tree, options.name);
+
+      expect(projectConfig.tags).toEqual(['vNext', 'platform:web']);
+    });
+
+    it(`should update project tags in nx.json if they already exist`, async () => {
+      let projectConfig = readProjectConfiguration(tree, options.name);
+
+      updateProjectConfiguration(tree, options.name, { ...projectConfig, tags: ['vNext'] });
+      projectConfig = readProjectConfiguration(tree, options.name);
+
+      expect(projectConfig.tags).toEqual(['vNext']);
+
+      await generator(tree, options);
+
+      projectConfig = readProjectConfiguration(tree, options.name);
+
+      expect(projectConfig.tags).toEqual(['vNext', 'platform:web']);
+    });
+  });
+
+  describe(`--stats`, () => {
+    beforeEach(() => {
+      setupDummyPackage(tree, { name: '@proj/react-foo', version: '9.0.22' });
+      setupDummyPackage(tree, { name: '@proj/react-bar', version: '9.0.31' });
+      setupDummyPackage(tree, { name: '@proj/react-old', version: '8.1.12' });
+      setupDummyPackage(tree, { name: '@proj/react-older', version: '8.9.12' });
+    });
+
+    it(`should print project names and count of how many have been migrated`, async () => {
+      const loggerInfoSpy = jest.spyOn(logger, 'info');
+
+      await generator(tree, { stats: true });
+
+      expect(loggerInfoSpy.mock.calls[2][0]).toEqual('Migrated (0):');
+      expect(loggerInfoSpy.mock.calls[3][0]).toEqual('');
+      expect(loggerInfoSpy.mock.calls[5][0]).toEqual(`Not migrated (3):`);
+      expect(loggerInfoSpy.mock.calls[6][0]).toEqual(
+        expect.stringContaining(stripIndents`
+      - @proj/react-dummy
+      - @proj/react-foo
+      - @proj/react-bar
+      `),
+      );
+
+      loggerInfoSpy.mockClear();
+
+      await generator(tree, options);
+      await generator(tree, { stats: true });
+
+      expect(loggerInfoSpy.mock.calls[2][0]).toEqual('Migrated (1):');
+      expect(loggerInfoSpy.mock.calls[5][0]).toEqual(`Not migrated (2):`);
+    });
+  });
 });
 
 // ==== helpers ====
 
 function setupDummyPackage(
   tree: Tree,
-  options: MigrateConvergedPkgGeneratorSchema & Partial<{ version: string; dependencies: Record<string, string> }>,
+  options: AssertedSchema &
+    Partial<{ version: string; dependencies: Record<string, string>; compilerOptions: TsConfig['compilerOptions'] }>,
 ) {
   const workspaceConfig = readWorkspaceConfiguration(tree);
   const defaults = {
@@ -486,6 +653,7 @@ function setupDummyPackage(
       tslib: '^2.1.0',
       someThirdPartyDep: '^11.1.2',
     },
+    compilerOptions: { baseUrl: '.', typeRoots: ['../../node_modules/@types', '../../typings'] },
   };
 
   const normalizedOptions = { ...defaults, ...options };
@@ -508,15 +676,13 @@ function setupDummyPackage(
         start: 'just-scripts dev:storybook',
         'start-test': 'just-scripts jest-watch',
         test: 'just-scripts test',
+        'test:watch': 'just-scripts jest-watch',
         'update-snapshots': 'just-scripts jest -u',
       },
       dependencies: normalizedOptions.dependencies,
     },
     tsConfig: {
-      compilerOptions: {
-        baseUrl: '.',
-        typeRoots: ['../../node_modules/@types', '../../typings'],
-      },
+      compilerOptions: normalizedOptions.compilerOptions,
     },
     jestConfig: stripIndents`
       const { createConfig } = require('@fluentui/scripts/jest/jest-resources');

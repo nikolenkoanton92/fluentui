@@ -1,6 +1,5 @@
 import * as React from 'react';
-import { Checkbox, Dropdown, IDropdownOption, Stack, TextField } from '@fluentui/react';
-import { Text } from '@fluentui/react-text';
+import { Checkbox, Dropdown, IDropdownOption, Stack, Text, TextField } from '@fluentui/react';
 import { PlaygroundProps } from './Playground.types';
 
 const tableStyle: React.CSSProperties = {
@@ -79,7 +78,7 @@ export const Playground = function <TType>(props: PlaygroundProps<TType>): JSX.E
           </tr>,
         );
       } else if (propType === 'string') {
-        newProps[propName] = prop.defaultValue || '';
+        newProps[propName] = (componentProps && componentProps[propName]) || prop.defaultValue || '';
 
         const onStringPropChange = (
           ev?: React.FormEvent<HTMLInputElement | HTMLTextAreaElement>,
@@ -109,7 +108,7 @@ export const Playground = function <TType>(props: PlaygroundProps<TType>): JSX.E
         );
       } else {
         const defaultSelectedKey = prop.defaultValue || propType[0];
-        newProps[propName] = prop.defaultValue || propType[0];
+        newProps[propName] = (componentProps && componentProps[propName]) || prop.defaultValue || propType[0];
 
         const onOptionsPropChange = (
           ev?: React.FormEvent<HTMLDivElement>,
@@ -147,7 +146,7 @@ export const Playground = function <TType>(props: PlaygroundProps<TType>): JSX.E
       <React.Fragment key={section.sectionName}>
         <tr>
           <td style={cellStyle} colSpan={2}>
-            <Text variant="title3">{section.sectionName}</Text>
+            <Text variant="medium">{section.sectionName}</Text>
           </td>
         </tr>
         {sectionList}
